@@ -1,30 +1,38 @@
-import gc
-
-import time
 import _thread
-from sys import stdin, stdout
-
-import json
-
 import binascii
+import gc
+import json
+import time
+from sys import stdin
+
 import machine
+import os
 import select
-import utime as utime
+import ubluetooth
 from micropython import const
-from machine import UART
 
 import ble_advertising
 import config_lora
+from cryptor import Cryptor
 import serial_communication as serial
 import sx127x
 
-import ubluetooth
-from ble_advertising import generate_advertising_payload as adpl
 #from micropyGPS import MicropyGPS
 
 gc.collect()
 
+controller = None
 lora: sx127x.SX127x = None
+lora_parameter = {
+    'address': bytes(0),
+    'tx_power_level': 40,
+    'signal_bandwidth': 125000,
+    'spreading_factor': 10,
+    'coding_rate': 5,
+    'key': bytes(0)
+}
+
+initialized = False
 
 intTime = 0
 debTime = 300
@@ -38,6 +46,11 @@ pin_led_green: machine.Pin
 pin_led_red: machine.Pin
 
 heartbeat_running = True
+paring_mode_running = False
+
+paring_mode_delay = 0.6
+
+reset = False
 
 def do_loop():
     serial.send_message_str(serial.TYPE_STATUS, serial.STATUS_READY_GLOBAL)
@@ -64,7 +77,8 @@ def do_loop():
     #    #lora.println("{\"name\": \"Test123\"}")
     #    time.sleep(0.01)
 
-    #module()
+    if 'basestation' not in os.listdir():
+        module()
 
     while True:
         poll = select.poll()
@@ -83,7 +97,6 @@ def do_loop():
             elif input == serial.INPUT_BLE_CONNECT:
                 ble = ubluetooth.BLE()
                 ble.active(True)
-                serial.send_message_str("status", input_arr[1])
                 ble.gap_connect(0x00, binascii.unhexlify(input_arr[1]))
 
         time.sleep(0.01)
@@ -101,11 +114,54 @@ def module():
 
     _thread.start_new_thread(heartbeat, ())
 
-    while True:
+    global reset
+    while not reset:
         time.sleep(0.01)
+    reset = False
+    main()
+
+
+def init():
+    global initialized, intTime, debTime, timer0, timer1, heartbeat_running, paring_mode_running, paring_mode_delay, reset
+
+    initialized = False
+
+    intTime = 0
+    debTime = 300
+
+    timer0 = machine.Timer(0)
+    timer1 = machine.Timer(1)
+
+    heartbeat_running = True
+    paring_mode_running = False
+
+    paring_mode_delay = 0.6
+
+    reset = False
+
+
+def init_params():
+    try:
+        with open('lora.config') as f:
+            global lora_parameter
+            lora_parameter = json.load(f)
+        global initialized
+        initialized = True
+        return
+    except (OSError, ValueError):
+        pass
+    ble = ubluetooth.BLE()
+    ble.active(True)
+    addr = ble.config('mac')[1]
+    lora_parameter['address'] = binascii.hexlify(addr)
+    cryptor = Cryptor()
+    lora_parameter['key'] = binascii.hexlify(cryptor.get_key())
+    ble.active(False)
 
 
 def main():
+    init()
+    init_params()
     init_lora()
     do_loop()
 
@@ -114,7 +170,7 @@ def init_ble():
     ble = ubluetooth.BLE()
     ble.active(True)
     ble.irq(ble_handler)
-    ble.gap_scan(30000, 1280000, 11250, True)
+    ble.gap_scan(30000, 300000, 11250, True)
 
 
 def disable_ble():
@@ -125,6 +181,9 @@ def disable_ble():
 
 
 def ble_handler(event, data):
+    if event == const(1):
+        global paring_mode_delay
+        paring_mode_delay = 0.1
     if event == const(5):
         addr_type, addr, adv_type, rssi, adv_data = data
         data = ble_advertising.parse_advertising_payload(bytes(addr), rssi, bytes(adv_data))
@@ -139,25 +198,61 @@ def ble_handler(event, data):
         conn_handle, start_handle, end_handle, uuid = data
         ble = ubluetooth.BLE()
         ble.gattc_discover_characteristics(conn_handle, start_handle, end_handle, ubluetooth.UUID('6E400002-B5A3-F393-E0A9-E50E24DCCA9E'))
+    elif event == const(10):
+        conn_handle, status = data
+        if status != 0:
+            serial.send_message_str(serial.TYPE_STATUS,  serial.STATUS_ERROR_OCCURRED)
     elif event == const(11):
         conn_handle, def_handle, value_handle, properties, uuid = data
         if uuid == ubluetooth.UUID('6E400002-B5A3-F393-E0A9-E50E24DCCA9E'):
-            serial.send_message_str("status", "123123123")
             ble = ubluetooth.BLE()
-            ble.gattc_write(conn_handle, value_handle, binascii.unhexlify("FFFFFFFF"))
+            ble.gattc_write(conn_handle, value_handle, binascii.unhexlify("01") + binascii.unhexlify(lora_parameter['address']))
             time.sleep(1)
-            ble.gattc_write(conn_handle, value_handle, binascii.unhexlify("AAAAAA"))
+            ble.gattc_write(conn_handle, value_handle, binascii.unhexlify("02") + lora_parameter['tx_power_level'].to_bytes(2, 'big'))
             time.sleep(1)
-            ble.gattc_write(conn_handle, value_handle, binascii.unhexlify("6666666666"))
-
+            ble.gattc_write(conn_handle, value_handle, binascii.unhexlify("03") + lora_parameter['signal_bandwidth'].to_bytes(5, 'big'))
+            time.sleep(1)
+            ble.gattc_write(conn_handle, value_handle, binascii.unhexlify("04") + lora_parameter['spreading_factor'].to_bytes(2, 'big'))
+            time.sleep(1)
+            ble.gattc_write(conn_handle, value_handle, binascii.unhexlify("05") + lora_parameter['coding_rate'].to_bytes(1, 'big'))
+            time.sleep(1)
+            ble.gattc_write(conn_handle, value_handle, binascii.unhexlify("06") + binascii.unhexlify(lora_parameter['key']))
+            time.sleep(1)
+            ble.gattc_write(conn_handle, value_handle, binascii.unhexlify("FFFF"))
+            serial.send_message_str(serial.TYPE_STATUS, serial.STATUS_BLE_DATA_SEND)
     elif event == const(12):
-        pass
-        # serial.send_message_str("status", "4")
+        conn_handle, status = data
+        if status != 0:
+            serial.send_message_str(serial.TYPE_STATUS,  serial.STATUS_ERROR_OCCURRED)
     elif event == const(3):
         conn_handle, attr_handle = data
         ble = ubluetooth.BLE()
         value = ble.gatts_read(attr_handle)
-        print(value)
+        print(binascii.hexlify(value))
+        value_array = bytearray(value)
+
+        type = value_array[:1]
+        data = value_array[1:]
+
+        if type == b'\x01':
+            lora_parameter['address'] = binascii.hexlify(bytes(data))
+        elif type == b'\x02':
+            lora_parameter['tx_power_level'] = int.from_bytes(data, 'big')
+        elif type == b'\x03':
+            lora_parameter['signal_bandwidth'] = int.from_bytes(data, 'big')
+        elif type == b'\x04':
+            lora_parameter['spreading_factor'] = int.from_bytes(data, 'big')
+        elif type == b'\x05':
+            lora_parameter['coding_rate'] = int.from_bytes(data, 'big')
+        elif type == b'\x06':
+            lora_parameter['key'] = binascii.hexlify(bytes(data))
+        elif type == b'\xFF':
+            with open('lora.config', 'w') as f:
+                json.dump(lora_parameter, f)
+
+            global reset
+            reset = True
+
         # TODO: Daten empfangen und speichern, verbindung aufbauen
 
 
@@ -182,10 +277,11 @@ def button_handler(t):
 
 
 def paring_mode(t):
-    global timer0, pin_button, pin_led_blue
+    global timer0, pin_button, pin_led_blue, paring_mode_running
     timer0.deinit()
     pin_button.irq(None)
     pin_led_blue.on()
+    paring_mode_running = True
     _thread.start_new_thread(blink, ())
     print("PARING MODE")
 
@@ -207,40 +303,63 @@ def paring_mode(t):
 
 def blink():
     global pin_led_blue
-    while True:
+    while paring_mode_running:
         pin_led_blue.on()
         time.sleep(0.05)
         pin_led_blue.off()
-        time.sleep(0.6)
+        time.sleep(paring_mode_delay)
 
 
 def heartbeat():
-    global pin_led_green, heartbeat_running
+    global pin_led_green, pin_led_red, heartbeat_running
+    if initialized:
+        pin_led = pin_led_green
+        delay = 2
+    else:
+        pin_led = pin_led_red
+        delay = 1
     while heartbeat_running:
-        pin_led_green.on()
+        pin_led.on()
         time.sleep(0.1)
-        pin_led_green.off()
-        time.sleep(2)
+        pin_led.off()
+        time.sleep(delay)
 
 
 def init_lora():
-    controller = config_lora.Controller()
-    global lora
-    lora = controller.add_transceiver(sx127x.SX127x(
-        name='LoRa',
-        parameters={
+    global controller, lora
+
+    if controller is None:
+        controller = config_lora.Controller()
+
+    if lora is not None:
+        controller.reset_pin(controller.pin_reset)
+        controller.transceivers['LoRa'].init(parameters={
             'frequency': 433E6,
-            'tx_power_level': 40,
-            'signal_bandwidth': 125E3,
-            'spreading_factor': 10,
-            'coding_rate': 5,
+            'tx_power_level': lora_parameter['tx_power_level'],
+            'signal_bandwidth': lora_parameter['signal_bandwidth'],
+            'spreading_factor': lora_parameter['spreading_factor'],
+            'coding_rate': lora_parameter['coding_rate'],
             'preamble_length': 8,
             'implicitHeader': False,
             'sync_word': 0x12,
             'enable_CRC': False
-        }),
-        pin_id_ss=config_lora.Controller.PIN_ID_FOR_LORA_SS,
-        pin_id_RxDone=config_lora.Controller.PIN_ID_FOR_LORA_DIO0)
+        })
+    else:
+        lora = controller.add_transceiver(sx127x.SX127x(
+            name='LoRa',
+            parameters={
+                'frequency': 433E6,
+                'tx_power_level': lora_parameter['tx_power_level'],
+                'signal_bandwidth': lora_parameter['signal_bandwidth'],
+                'spreading_factor': lora_parameter['spreading_factor'],
+                'coding_rate': lora_parameter['coding_rate'],
+                'preamble_length': 8,
+                'implicitHeader': False,
+                'sync_word': 0x12,
+                'enable_CRC': False
+            }),
+            pin_id_ss=config_lora.Controller.PIN_ID_FOR_LORA_SS,
+            pin_id_RxDone=config_lora.Controller.PIN_ID_FOR_LORA_DIO0)
 
     lora.on_receive(on_lora_receive)
     lora.receive()

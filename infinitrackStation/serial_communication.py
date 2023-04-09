@@ -11,6 +11,7 @@ TYPE_BLE_SCAN_RESULT = "ble_scan_result"
 TYPE_LORA_RECV = "lora_msg"
 
 STATUS_READY_GLOBAL = "ready_global"
+STATUS_ERROR_OCCURRED = "unknown_error"
 STATUS_BLE_SCAN_STARTED = "ble_scan_started"
 STATUS_BLE_SCAN_STOPPED = "ble_scan_stopped"
 

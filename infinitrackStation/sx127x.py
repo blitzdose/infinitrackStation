@@ -93,6 +93,7 @@ class SX127x:
 
         # check version
         version = self.read_register(REG_VERSION)
+        print(f'Version: {version}')
         if version != 0x12:
             raise Exception(f'Invalid version: {version}')
 
