@@ -46,6 +46,7 @@ MODE_STDBY = 0x01
 MODE_TX = 0x03
 MODE_RX_CONTINUOUS = 0x05
 MODE_RX_SINGLE = 0x06
+MODE_CAD = 0x07
 
 # PA config
 PA_BOOST = 0x80
@@ -54,6 +55,8 @@ PA_BOOST = 0x80
 IRQ_TX_DONE_MASK = 0x08
 IRQ_PAYLOAD_CRC_ERROR_MASK = 0x20
 IRQ_RX_DONE_MASK = 0x40
+IRQ_CAD_DONE_MASK = 0x04
+IRQ_CAD_DETECTED_MASK = 0x01
 IRQ_RX_TIME_OUT_MASK = 0x80
 
 # Buffer size
@@ -83,6 +86,7 @@ class SX127x:
         self.name = name
         self.parameters = parameters
         self._onReceive = on_receive
+        self._onCad = None
         self._lock = False
         self._implicitHeaderMode = None
         self._frequency = None
@@ -166,7 +170,12 @@ class SX127x:
         return size
 
     def aquire_lock(self, lock=False):
-        pass
+        if lock:
+            while self._lock:
+                pass
+            self._lock = True
+        else:
+            self._lock = False
 
     def println(self, string, implict_header=False):
         self.aquire_lock(True)  # wait until RX_Done, lock and begin writing.
@@ -176,6 +185,15 @@ class SX127x:
         self.end_packet()
 
         self.aquire_lock(False)  # unlock when done writing
+
+    def printbuff(self, buffer, implict_header=False):
+        self.aquire_lock(True)
+
+        self.begin_packet(implict_header)
+        self.write(buffer)
+        self.end_packet()
+
+        self.aquire_lock(False)
 
     def get_irq_flags(self):
         irq_flags = self.read_register(REG_IRQ_FLAGS)
@@ -193,6 +211,10 @@ class SX127x:
 
     def sleep(self):
         self.write_register(REG_OP_MODE, MODE_LONG_RANGE_MODE | MODE_SLEEP)
+
+    def cad(self):
+        self.write_register(REG_DIO_MAPPING_1, 0x80)
+        self.write_register(REG_OP_MODE, MODE_LONG_RANGE_MODE | MODE_CAD)
 
     def set_tx_power(self, level, output_pin=PA_OUTPUT_PA_BOOST_PIN):
         if output_pin == PA_OUTPUT_RFO_PIN:
@@ -262,6 +284,13 @@ class SX127x:
             config = modem_config_1 | 0x01 if implicit_header_mode else modem_config_1 & 0xfe
             self.write_register(REG_MODEM_CONFIG_1, config)
 
+    def on_cad(self, callback):
+        self._onCad = callback
+        if self.pin_RxDone:
+            if callback:
+                self.write_register(REG_DIO_MAPPING_1, 0x00)
+                self.pin_RxDone.set_handler_for_irq_on_rising_edge(handler=self.handle_on_receive)
+
     def on_receive(self, callback):
         self._onReceive = callback
 
@@ -288,6 +317,14 @@ class SX127x:
     # http://raspi.tv/2013/how-to-use-interrupts-with-python-on-the-raspberry-pi-and-rpi-gpio-part-2
     def handle_on_receive(self, event_source):
         self.aquire_lock(True)  # lock until TX_Done
+
+        irq_flags = self.get_irq_flags()
+
+        if (irq_flags & IRQ_CAD_DONE_MASK) != 0:
+            if self._onCad:
+                self.aquire_lock(False)
+                self._onCad(irq_flags & IRQ_CAD_DETECTED_MASK)
+            return
 
         # irqFlags = self.getIrqFlags() should be 0x50
         if (self.get_irq_flags() & IRQ_PAYLOAD_CRC_ERROR_MASK) == 0:
@@ -345,4 +382,4 @@ class SX127x:
 
     def collect_garbage(self):
         gc.collect()
-        print('[Memory - free: {}   allocated: {}]'.format(gc.mem_free(), gc.mem_alloc()))
+        #print('[Memory - free: {}   allocated: {}]'.format(gc.mem_free(), gc.mem_alloc()))
