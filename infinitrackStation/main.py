@@ -2,6 +2,8 @@ import _thread
 import binascii
 import gc
 import json
+import random
+import struct
 import time
 from sys import stdin
 
@@ -10,27 +12,32 @@ import os
 import select
 import ubluetooth
 from micropython import const
+import urandom
 
 import ble_advertising
 import config_lora
+import cryptor
 from cryptor import Cryptor
 import serial_communication as serial
 import sx127x
 
-#from micropyGPS import MicropyGPS
+from micropyGPS import MicropyGPS
 
 gc.collect()
 
 controller = None
 lora: sx127x.SX127x = None
 lora_parameter = {
-    'address': bytes(0),
+    'address': '',
     'tx_power_level': 40,
-    'signal_bandwidth': 125000,
+    'signal_bandwidth': 500000,
     'spreading_factor': 10,
     'coding_rate': 5,
-    'key': bytes(0)
+    'key': bytes(0),
+    'myaddress': ''
 }
+
+gps: MicropyGPS
 
 initialized = False
 
@@ -39,6 +46,7 @@ debTime = 300
 
 timer0 = machine.Timer(0)
 timer1 = machine.Timer(1)
+timer2 = machine.Timer(2)
 
 pin_button: machine.Pin
 pin_led_blue: machine.Pin
@@ -52,30 +60,11 @@ paring_mode_delay = 0.6
 
 reset = False
 
+send_timer_running = False
+
+
 def do_loop():
     serial.send_message_str(serial.TYPE_STATUS, serial.STATUS_READY_GLOBAL)
-
-    #uart = UART(1)
-    #uart.init(baudrate=9600, tx=16, rx=4)
-#
-    #gps = MicropyGPS(location_formatting="dd")
-#
-    #while True:
-    #    try:
-    #        if uart.any() > 0:
-    #            nmea_sentence = uart.readline().decode('utf-8')
-    #            print(nmea_sentence)
-    #            for x in nmea_sentence:
-    #                gps.update(x)
-#
-    #            print(gps.latitude)
-    #            print(gps.longitude)
-    #            print(gps.coord_format)
-    #    except UnicodeError:
-    #        pass
-#
-    #    #lora.println("{\"name\": \"Test123\"}")
-    #    time.sleep(0.01)
 
     if 'basestation' not in os.listdir():
         module()
@@ -98,7 +87,6 @@ def do_loop():
                 ble = ubluetooth.BLE()
                 ble.active(True)
                 ble.gap_connect(0x00, binascii.unhexlify(input_arr[1]))
-
         time.sleep(0.01)
 
 
@@ -114,15 +102,53 @@ def module():
 
     _thread.start_new_thread(heartbeat, ())
 
-    global reset
+    uart = machine.UART(1)
+    uart.init(baudrate=9600, tx=16, rx=4)
+
+    global gps, send_timer_running, reset
+    gps = MicropyGPS(location_formatting="dd")
+
     while not reset:
+        while not heartbeat_running:
+            timer2.deinit()
+            send_timer_running = False
+            time.sleep(0.01)
+        try:
+            if uart.any() > 0:
+                nmea_sentence = uart.readline().decode('utf-8')
+                print(nmea_sentence)
+                for x in nmea_sentence:
+                    gps.update(x)
+        except UnicodeError:
+            pass
+
+        if not send_timer_running:
+            timer2.init(mode=machine.Timer.ONE_SHOT, period=2000, callback=activity_detection)
+            send_timer_running = True
         time.sleep(0.01)
     reset = False
     main()
 
 
+def cad(detected):
+    lora.standby()
+    if detected == 0:
+        send_position()
+        global send_timer_running
+        send_timer_running = False
+    else:
+        wait_time = urandom.randint(50, 100)
+        timer2.init(mode=machine.Timer.ONE_SHOT, period=wait_time, callback=activity_detection)
+        pass
+
+
+def activity_detection(t):
+    lora.standby()
+    lora.cad()
+
+
 def init():
-    global initialized, intTime, debTime, timer0, timer1, heartbeat_running, paring_mode_running, paring_mode_delay, reset
+    global initialized, intTime, debTime, timer0, timer1, timer2, heartbeat_running, paring_mode_running, paring_mode_delay, reset
 
     initialized = False
 
@@ -131,6 +157,7 @@ def init():
 
     timer0 = machine.Timer(0)
     timer1 = machine.Timer(1)
+    timer2 = machine.Timer(2)
 
     heartbeat_running = True
     paring_mode_running = False
@@ -154,9 +181,12 @@ def init_params():
     ble.active(True)
     addr = ble.config('mac')[1]
     lora_parameter['address'] = binascii.hexlify(addr)
+    lora_parameter['myaddress'] = binascii.hexlify(addr)
     cryptor = Cryptor()
     lora_parameter['key'] = binascii.hexlify(cryptor.get_key())
     ble.active(False)
+    if 'basestation' in os.listdir():
+        initialized = True
 
 
 def main():
@@ -181,6 +211,7 @@ def disable_ble():
 
 
 def ble_handler(event, data):
+    serial.send_message_str(serial.TYPE_STATUS, f'event: {event}')
     if event == const(1):
         global paring_mode_delay
         paring_mode_delay = 0.1
@@ -197,33 +228,40 @@ def ble_handler(event, data):
     elif event == const(9):
         conn_handle, start_handle, end_handle, uuid = data
         ble = ubluetooth.BLE()
-        ble.gattc_discover_characteristics(conn_handle, start_handle, end_handle, ubluetooth.UUID('6E400002-B5A3-F393-E0A9-E50E24DCCA9E'))
+        ble.gattc_discover_characteristics(conn_handle, start_handle, end_handle,
+                                           ubluetooth.UUID('6E400002-B5A3-F393-E0A9-E50E24DCCA9E'))
     elif event == const(10):
         conn_handle, status = data
         if status != 0:
-            serial.send_message_str(serial.TYPE_STATUS,  serial.STATUS_ERROR_OCCURRED)
+            serial.send_message_str(serial.TYPE_STATUS, serial.STATUS_ERROR_OCCURRED)
     elif event == const(11):
         conn_handle, def_handle, value_handle, properties, uuid = data
         if uuid == ubluetooth.UUID('6E400002-B5A3-F393-E0A9-E50E24DCCA9E'):
             ble = ubluetooth.BLE()
-            ble.gattc_write(conn_handle, value_handle, binascii.unhexlify("01") + binascii.unhexlify(lora_parameter['address']))
+            ble.gattc_write(conn_handle, value_handle,
+                            binascii.unhexlify("01") + binascii.unhexlify(lora_parameter['address']))
             time.sleep(1)
-            ble.gattc_write(conn_handle, value_handle, binascii.unhexlify("02") + lora_parameter['tx_power_level'].to_bytes(2, 'big'))
+            ble.gattc_write(conn_handle, value_handle,
+                            binascii.unhexlify("02") + lora_parameter['tx_power_level'].to_bytes(2, 'big'))
             time.sleep(1)
-            ble.gattc_write(conn_handle, value_handle, binascii.unhexlify("03") + lora_parameter['signal_bandwidth'].to_bytes(5, 'big'))
+            ble.gattc_write(conn_handle, value_handle,
+                            binascii.unhexlify("03") + lora_parameter['signal_bandwidth'].to_bytes(5, 'big'))
             time.sleep(1)
-            ble.gattc_write(conn_handle, value_handle, binascii.unhexlify("04") + lora_parameter['spreading_factor'].to_bytes(2, 'big'))
+            ble.gattc_write(conn_handle, value_handle,
+                            binascii.unhexlify("04") + lora_parameter['spreading_factor'].to_bytes(2, 'big'))
             time.sleep(1)
-            ble.gattc_write(conn_handle, value_handle, binascii.unhexlify("05") + lora_parameter['coding_rate'].to_bytes(1, 'big'))
+            ble.gattc_write(conn_handle, value_handle,
+                            binascii.unhexlify("05") + lora_parameter['coding_rate'].to_bytes(1, 'big'))
             time.sleep(1)
-            ble.gattc_write(conn_handle, value_handle, binascii.unhexlify("06") + binascii.unhexlify(lora_parameter['key']))
+            ble.gattc_write(conn_handle, value_handle,
+                            binascii.unhexlify("06") + binascii.unhexlify(lora_parameter['key']))
             time.sleep(1)
             ble.gattc_write(conn_handle, value_handle, binascii.unhexlify("FFFF"))
             serial.send_message_str(serial.TYPE_STATUS, serial.STATUS_BLE_DATA_SEND)
     elif event == const(12):
         conn_handle, status = data
         if status != 0:
-            serial.send_message_str(serial.TYPE_STATUS,  serial.STATUS_ERROR_OCCURRED)
+            serial.send_message_str(serial.TYPE_STATUS, serial.STATUS_ERROR_OCCURRED)
     elif event == const(3):
         conn_handle, attr_handle = data
         ble = ubluetooth.BLE()
@@ -249,11 +287,11 @@ def ble_handler(event, data):
         elif type == b'\xFF':
             with open('lora.config', 'w') as f:
                 json.dump(lora_parameter, f)
+                Cryptor().set_key(binascii.unhexlify(lora_parameter['key']))
 
-            global reset
+            global reset, heartbeat_running
             reset = True
-
-        # TODO: Daten empfangen und speichern, verbindung aufbauen
+            heartbeat_running = True
 
 
 def debounce(pin):
@@ -289,7 +327,8 @@ def paring_mode(t):
     ble.active(True)
     ble.irq(ble_handler)
     payload = ble_advertising.generate_advertising_payload(name="Infinitrack Module")
-    payload2 = ble_advertising.generate_advertising_payload(custom_data=binascii.unhexlify("4954496e66696e69747261636b4d6f64"))
+    payload2 = ble_advertising.generate_advertising_payload(
+        custom_data=binascii.unhexlify("4954496e66696e69747261636b4d6f64"))
 
     UART_UUID = ubluetooth.UUID('6E400001-B5A3-F393-E0A9-E50E24DCCA9E')
     UART_TX = (ubluetooth.UUID('6E400003-B5A3-F393-E0A9-E50E24DCCA9E'), ubluetooth.FLAG_READ | ubluetooth.FLAG_NOTIFY,)
@@ -342,7 +381,7 @@ def init_lora():
             'preamble_length': 8,
             'implicitHeader': False,
             'sync_word': 0x12,
-            'enable_CRC': False
+            'enable_CRC': True
         })
     else:
         lora = controller.add_transceiver(sx127x.SX127x(
@@ -356,26 +395,76 @@ def init_lora():
                 'preamble_length': 8,
                 'implicitHeader': False,
                 'sync_word': 0x12,
-                'enable_CRC': False
+                'enable_CRC': True
             }),
             pin_id_ss=config_lora.Controller.PIN_ID_FOR_LORA_SS,
             pin_id_RxDone=config_lora.Controller.PIN_ID_FOR_LORA_DIO0)
 
     lora.on_receive(on_lora_receive)
-    lora.receive()
+    lora.on_cad(cad)
+    if initialized:
+        if 'basestation' in os.listdir():
+            lora.receive()
 
 
-def on_lora_receive(lora, payload):
-    payload_string = payload.decode()
-    payload_dict = json.loads(payload_string)
+def on_lora_receive(lora: sx127x.SX127x, payload):
+    global send_timer_running
+    send_timer_running = False
+    print("data recv")
+    if not len(payload) >= 18:
+        print(f'too short: {len(payload)}')
+        return
+    if not payload[:4] == b'infi':
+        print(f"recv incorrect: {binascii.hexlify(payload)}")
+        return
 
-    rssi = lora.packet_rssi()
+    recv_addr = payload[4:10]
+    if recv_addr != binascii.unhexlify(lora_parameter['myaddress']):
+        print(f'recv-addr incorrect: {binascii.hexlify(recv_addr)}, {lora_parameter["myaddress"]}')
+        return
 
-    message_dict = dict()
-    message_dict['rssi'] = rssi
-    message_dict['payload'] = payload_dict
+    send_addr = payload[10:16]
+    type = payload[16:17]
+    msg = payload[17:18]
 
-    serial.send_message_json(serial.TYPE_LORA_RECV, message_dict)
+    if 'basestation' in os.listdir():
+        rssi = lora.packet_rssi()
+
+        message_dict = dict()
+        message_dict['rssi'] = rssi
+        message_dict['header'] = binascii.hexlify(payload[:18])
+        message_dict['payload'] = binascii.hexlify(Cryptor().decrypt(payload[18:]))
+
+        serial.send_message_json(serial.TYPE_LORA_RECV, message_dict)
+
+
+def send_position():
+    global gps
+    if gps.satellite_data_updated():
+        print("position fixed")
+
+        # TODO: Speed Vergessen
+
+        timestamp = int((gps.timestamp[0] * 3600) + (gps.timestamp[1] * 60) + (gps.timestamp[2])).to_bytes(3, 'big')  # in seconds
+        date = gps.date[2].to_bytes(1, 'big') + gps.date[1].to_bytes(1, 'big') + gps.date[0].to_bytes(1, 'big')  # yyymdd
+        latitude = struct.pack('>f', gps.latitude[0]) + (b'\x01' if gps.latitude[1] == 'N' else b'\x00')  # 4 bytes lat float, 1 byte is N?
+        longitude = struct.pack('>f', gps.longitude[0]) + (b'\x01' if gps.longitude[1] == 'E' else b'\x00')  # 4 bytes long float, 1 byte is E?
+        satellites_in_use = gps.satellites_in_use.to_bytes(1, 'big')  # 2 bytes for satellites in use
+        altitude = struct.pack('>f', gps.altitude)  # 4 bytes altitude float
+        pdop = struct.pack('>f', gps.pdop)  # 4 bytes pdop float
+
+        payload_bytes = timestamp + date + latitude + longitude + satellites_in_use + altitude + pdop  # 02 = response-type, 01 = position
+        header_bytes = b'infi' + bytes(binascii.unhexlify(lora_parameter['address'])) + bytes(binascii.unhexlify(lora_parameter['myaddress'])) + b'\x02\x01'
+
+        payload_bytes_encrypted = Cryptor().encrypt(payload_bytes)
+
+        response = header_bytes + payload_bytes_encrypted
+
+        lora.printbuff(response)
+
+    else:
+        print("position N/A")
+        lora.printbuff(b'infi' + bytes(binascii.unhexlify(lora_parameter['address'])) + bytes(binascii.unhexlify(lora_parameter['myaddress'])) + b'\x02\x01' + Cryptor().encrypt(b'\xFF\xFF'))
 
 
 if __name__ == "__main__":
