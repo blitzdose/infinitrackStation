@@ -443,17 +443,16 @@ def send_position():
     if gps.satellite_data_updated():
         print("position fixed")
 
-        # TODO: Speed Vergessen
-
         timestamp = int((gps.timestamp[0] * 3600) + (gps.timestamp[1] * 60) + (gps.timestamp[2])).to_bytes(3, 'big')  # in seconds
         date = gps.date[2].to_bytes(1, 'big') + gps.date[1].to_bytes(1, 'big') + gps.date[0].to_bytes(1, 'big')  # yyymdd
         latitude = struct.pack('>f', gps.latitude[0]) + (b'\x01' if gps.latitude[1] == 'N' else b'\x00')  # 4 bytes lat float, 1 byte is N?
         longitude = struct.pack('>f', gps.longitude[0]) + (b'\x01' if gps.longitude[1] == 'E' else b'\x00')  # 4 bytes long float, 1 byte is E?
+        speed = struct.pack('>f', gps.speed[2]) # 4 bytes speed float
         satellites_in_use = gps.satellites_in_use.to_bytes(1, 'big')  # 2 bytes for satellites in use
         altitude = struct.pack('>f', gps.altitude)  # 4 bytes altitude float
         pdop = struct.pack('>f', gps.pdop)  # 4 bytes pdop float
 
-        payload_bytes = timestamp + date + latitude + longitude + satellites_in_use + altitude + pdop  # 02 = response-type, 01 = position
+        payload_bytes = timestamp + date + latitude + longitude + speed + satellites_in_use + altitude + pdop  # 02 = response-type, 01 = position
         header_bytes = b'infi' + bytes(binascii.unhexlify(lora_parameter['address'])) + bytes(binascii.unhexlify(lora_parameter['myaddress'])) + b'\x02\x01'
 
         payload_bytes_encrypted = Cryptor().encrypt(payload_bytes)
