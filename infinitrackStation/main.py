@@ -7,6 +7,8 @@ import struct
 import time
 from sys import stdin
 
+import esp
+import esp32
 import machine
 import os
 import select
@@ -47,6 +49,7 @@ debTime = 300
 timer0 = machine.Timer(0)
 timer1 = machine.Timer(1)
 timer2 = machine.Timer(2)
+timer3 = machine.Timer(3)
 
 pin_button: machine.Pin
 pin_led_blue: machine.Pin
@@ -62,12 +65,14 @@ reset = False
 
 send_timer_running = False
 
+button_pressed_time = 0
+
 
 def do_loop():
-    serial.send_message_str(serial.TYPE_STATUS, serial.STATUS_READY_GLOBAL)
-
     if 'basestation' not in os.listdir():
         module()
+
+    serial.send_message_str(serial.TYPE_STATUS, serial.STATUS_READY_GLOBAL)
 
     while True:
         poll = select.poll()
@@ -93,14 +98,22 @@ def do_loop():
 def module():
     global pin_button
     pin_button = machine.Pin(33, machine.Pin.IN, machine.Pin.PULL_UP)
-    pin_button.irq(debounce, machine.Pin.IRQ_RISING)
+    pin_button.irq(debounce, machine.Pin.IRQ_RISING | machine.Pin.IRQ_FALLING)
 
     global pin_led_blue, pin_led_green, pin_led_red
     pin_led_blue = machine.Pin(2, machine.Pin.OUT)
     pin_led_green = machine.Pin(17, machine.Pin.OUT)
     pin_led_red = machine.Pin(13, machine.Pin.OUT)
 
-    _thread.start_new_thread(heartbeat, ())
+    serial.send_message_str(serial.TYPE_STATUS, serial.STATUS_READY_GLOBAL)
+
+    if machine.reset_cause() != machine.DEEPSLEEP_RESET:
+        esp32.wake_on_ext0(pin=pin_button, level=esp32.WAKEUP_ALL_LOW)
+
+        print("going to sleep")
+        machine.deepsleep()
+
+    timer3.init(mode=machine.Timer.PERIODIC, period=2000, callback=heartbeat)
 
     uart = machine.UART(1)
     uart.init(baudrate=9600, tx=16, rx=4)
@@ -134,6 +147,7 @@ def cad(detected):
     lora.standby()
     if detected == 0:
         send_position()
+        lora.sleep()
         global send_timer_running
         send_timer_running = False
     else:
@@ -148,7 +162,20 @@ def activity_detection(t):
 
 
 def init():
-    global initialized, intTime, debTime, timer0, timer1, timer2, heartbeat_running, paring_mode_running, paring_mode_delay, reset
+
+    if machine.reset_cause() == machine.DEEPSLEEP_RESET:
+        global pin_led_green
+        pin_led_green = machine.Pin(17, machine.Pin.OUT)
+
+        pin_led_green.on()
+        time.sleep(0.2)
+        pin_led_green.off()
+        time.sleep(0.3)
+        pin_led_green.on()
+        time.sleep(0.2)
+        pin_led_green.off()
+
+    global initialized, intTime, debTime, timer0, timer1, timer2, timer3, heartbeat_running, paring_mode_running, paring_mode_delay, reset
 
     initialized = False
 
@@ -158,6 +185,7 @@ def init():
     timer0 = machine.Timer(0)
     timer1 = machine.Timer(1)
     timer2 = machine.Timer(2)
+    timer3 = machine.Timer(3)
 
     heartbeat_running = True
     paring_mode_running = False
@@ -300,18 +328,21 @@ def debounce(pin):
 
 
 def button_handler(t):
-    global pin_button, pin_led_blue, heartbeat_running
+    global pin_button, pin_led_blue, heartbeat_running, button_pressed_time
     if pin_button.value() == 0:
         pin_led_blue.on()
         print('pressed')
+        button_pressed_time = time.time_ns()
         timer1.init(mode=machine.Timer.ONE_SHOT, period=5000, callback=paring_mode)
         heartbeat_running = False
+        timer3.deinit()
     else:
         pin_led_blue.off()
         print('unpressed')
+        print(time.time_ns() - button_pressed_time)
         timer1.deinit()
         heartbeat_running = True
-        _thread.start_new_thread(heartbeat, ())
+        timer3.init(mode=machine.Timer.PERIODIC, period=2000, callback=heartbeat)
 
 
 def paring_mode(t):
@@ -349,19 +380,15 @@ def blink():
         time.sleep(paring_mode_delay)
 
 
-def heartbeat():
+def heartbeat(t):
     global pin_led_green, pin_led_red, heartbeat_running
     if initialized:
         pin_led = pin_led_green
-        delay = 2
     else:
         pin_led = pin_led_red
-        delay = 1
-    while heartbeat_running:
-        pin_led.on()
-        time.sleep(0.1)
-        pin_led.off()
-        time.sleep(delay)
+    pin_led.on()
+    time.sleep(0.1)
+    pin_led.off()
 
 
 def init_lora():
@@ -402,6 +429,7 @@ def init_lora():
 
     lora.on_receive(on_lora_receive)
     lora.on_cad(cad)
+    lora.sleep()
     if initialized:
         if 'basestation' in os.listdir():
             lora.receive()
@@ -411,7 +439,7 @@ def on_lora_receive(lora: sx127x.SX127x, payload):
     global send_timer_running
     send_timer_running = False
     print("data recv")
-    if not len(payload) >= 18:
+    if not len(payload) >= 16:
         print(f'too short: {len(payload)}')
         return
     if not payload[:4] == b'infi':
@@ -424,16 +452,14 @@ def on_lora_receive(lora: sx127x.SX127x, payload):
         return
 
     send_addr = payload[10:16]
-    type = payload[16:17]
-    msg = payload[17:18]
 
     if 'basestation' in os.listdir():
         rssi = lora.packet_rssi()
 
         message_dict = dict()
         message_dict['rssi'] = rssi
-        message_dict['header'] = binascii.hexlify(payload[:18])
-        message_dict['payload'] = binascii.hexlify(Cryptor().decrypt(payload[18:]))
+        message_dict['header'] = binascii.hexlify(payload[:16])
+        message_dict['payload'] = binascii.hexlify(Cryptor().decrypt(payload[16:]))
 
         serial.send_message_json(serial.TYPE_LORA_RECV, message_dict)
 
@@ -448,12 +474,13 @@ def send_position():
         latitude = struct.pack('>f', gps.latitude[0]) + (b'\x01' if gps.latitude[1] == 'N' else b'\x00')  # 4 bytes lat float, 1 byte is N?
         longitude = struct.pack('>f', gps.longitude[0]) + (b'\x01' if gps.longitude[1] == 'E' else b'\x00')  # 4 bytes long float, 1 byte is E?
         speed = struct.pack('>f', gps.speed[2]) # 4 bytes speed float
+        course = struct.pack('>f', gps.course) # 4 bytes course float
         satellites_in_use = gps.satellites_in_use.to_bytes(1, 'big')  # 2 bytes for satellites in use
         altitude = struct.pack('>f', gps.altitude)  # 4 bytes altitude float
         pdop = struct.pack('>f', gps.pdop)  # 4 bytes pdop float
 
-        payload_bytes = timestamp + date + latitude + longitude + speed + satellites_in_use + altitude + pdop  # 02 = response-type, 01 = position
-        header_bytes = b'infi' + bytes(binascii.unhexlify(lora_parameter['address'])) + bytes(binascii.unhexlify(lora_parameter['myaddress'])) + b'\x02\x01'
+        payload_bytes = timestamp + date + latitude + longitude + speed + course + satellites_in_use + altitude + pdop  # 02 = response-type, 01 = position
+        header_bytes = b'infi' + bytes(binascii.unhexlify(lora_parameter['address'])) + bytes(binascii.unhexlify(lora_parameter['myaddress']))
 
         payload_bytes_encrypted = Cryptor().encrypt(payload_bytes)
 
@@ -463,7 +490,7 @@ def send_position():
 
     else:
         print("position N/A")
-        lora.printbuff(b'infi' + bytes(binascii.unhexlify(lora_parameter['address'])) + bytes(binascii.unhexlify(lora_parameter['myaddress'])) + b'\x02\x01' + Cryptor().encrypt(b'\xFF\xFF'))
+        lora.printbuff(b'infi' + bytes(binascii.unhexlify(lora_parameter['address'])) + bytes(binascii.unhexlify(lora_parameter['myaddress'])) + Cryptor().encrypt(b'\xFF\xFF'))
 
 
 if __name__ == "__main__":
