@@ -53,6 +53,8 @@ pin_led_blue: machine.Pin
 pin_led_green: machine.Pin
 pin_led_red: machine.Pin
 
+adc_lipo: machine.ADC
+
 heartbeat_running = True
 paring_mode_running = False
 
@@ -61,6 +63,30 @@ paring_mode_delay = 0.6
 reset = False
 
 send_timer_running = False
+
+charge_levels = [
+    4.20,
+    4.15,
+    4.11,
+    4.08,
+    4.02,
+    3.98,
+    3.95,
+    3.91,
+    3.87,
+    3.85,
+    3.84,
+    3.82,
+    3.80,
+    3.79,
+    3.77,
+    3.75,
+    3.73,
+    3.71,
+    3.69,
+    3.61,
+    3.27
+]
 
 
 def do_loop():
@@ -95,10 +121,13 @@ def module():
     pin_button = machine.Pin(33, machine.Pin.IN, machine.Pin.PULL_UP)
     pin_button.irq(debounce, machine.Pin.IRQ_RISING)
 
-    global pin_led_blue, pin_led_green, pin_led_red
+    global pin_led_blue, pin_led_green, pin_led_red, adc_lipo
     pin_led_blue = machine.Pin(2, machine.Pin.OUT)
     pin_led_green = machine.Pin(17, machine.Pin.OUT)
     pin_led_red = machine.Pin(13, machine.Pin.OUT)
+
+    adc_lipo = machine.ADC(machine.Pin(12))
+    adc_lipo.atten(machine.ADC.ATTN_11DB)
 
     _thread.start_new_thread(heartbeat, ())
 
@@ -464,6 +493,30 @@ def send_position():
     else:
         print("position N/A")
         lora.printbuff(b'infi' + bytes(binascii.unhexlify(lora_parameter['address'])) + bytes(binascii.unhexlify(lora_parameter['myaddress'])) + b'\x02\x01' + Cryptor().encrypt(b'\xFF\xFF'))
+
+
+def get_charge_level():
+    val = adc_lipo.read()
+
+    voltage_level = val * 1.7 / 1000
+    charge = 100
+    if voltage_level > 4.2:
+        charge = 100
+    elif voltage_level < 3.27:
+        charge = 0
+    else:
+        idx = 0
+        for level in charge_levels:
+            if level < voltage_level:
+                level_before = charge_levels[idx-1]
+                change = level_before - level
+
+                linear_regression = ((voltage_level - level) * (5 / change))
+                charge = ((20 - idx) * 5) + linear_regression
+                break
+            idx = idx + 1
+
+    return round(charge), voltage_level
 
 
 if __name__ == "__main__":
