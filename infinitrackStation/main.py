@@ -2,27 +2,23 @@ import _thread
 import binascii
 import gc
 import json
-import random
+import os
 import struct
 import time
 from sys import stdin
 
-import esp
 import esp32
 import machine
-import os
 import select
 import ubluetooth
-from micropython import const
 import urandom
+from micropython import const
 
 import ble_advertising
 import config_lora
-import cryptor
-from cryptor import Cryptor
 import serial_communication as serial
 import sx127x
-
+from cryptor import Cryptor
 from micropyGPS import MicropyGPS
 
 gc.collect()
@@ -141,7 +137,7 @@ def module():
 
     timer3.init(mode=machine.Timer.PERIODIC, period=2000, callback=heartbeat)
 
-    adc_lipo = machine.ADC(machine.Pin(12))
+    adc_lipo = machine.ADC(machine.Pin(32))
     adc_lipo.atten(machine.ADC.ATTN_11DB)
 
     uart = machine.UART(1)
@@ -158,7 +154,7 @@ def module():
         try:
             if uart.any() > 0:
                 nmea_sentence = uart.readline().decode('utf-8')
-                print(nmea_sentence)
+                #print(nmea_sentence)
                 for x in nmea_sentence:
                     gps.update(x)
         except UnicodeError:
@@ -507,8 +503,9 @@ def send_position():
         satellites_in_use = gps.satellites_in_use.to_bytes(1, 'big')  # 2 bytes for satellites in use
         altitude = struct.pack('>f', gps.altitude)  # 4 bytes altitude float
         pdop = struct.pack('>f', gps.pdop)  # 4 bytes pdop float
+        charge_level = get_charge_level()[0].to_bytes(1, 'big')
 
-        payload_bytes = timestamp + date + latitude + longitude + speed + course + satellites_in_use + altitude + pdop  # 02 = response-type, 01 = position
+        payload_bytes = timestamp + date + latitude + longitude + speed + course + satellites_in_use + altitude + pdop + charge_level  # 02 = response-type, 01 = position
         header_bytes = b'infi' + bytes(binascii.unhexlify(lora_parameter['address'])) + bytes(binascii.unhexlify(lora_parameter['myaddress']))
 
         payload_bytes_encrypted = Cryptor().encrypt(payload_bytes)
@@ -516,6 +513,10 @@ def send_position():
         response = header_bytes + payload_bytes_encrypted
 
         lora.printbuff(response)
+        print(binascii.hexlify(payload_bytes))
+        print(gps.latitude[0])
+        print(gps.longitude[0])
+        print(gps.satellites_in_use)
 
     else:
         print("position N/A")
