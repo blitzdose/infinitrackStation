@@ -253,6 +253,7 @@ class Module:
                     nmea_sentence = uart.readline().decode('utf-8')
                     for x in nmea_sentence:
                         self.gps.update(x)
+                    print(nmea_sentence)
             except UnicodeError:
                 pass
             time.sleep(0.01)
