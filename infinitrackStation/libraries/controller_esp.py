@@ -1,6 +1,6 @@
 from machine import Pin, SPI, reset
-import config_lora
-import controller
+import libraries.config_lora as config_lora
+import libraries.controller as controller
 
 
 class Controller(controller.Controller):

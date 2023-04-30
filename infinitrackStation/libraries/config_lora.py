@@ -35,4 +35,4 @@ if IS_MICROPYTHON:
     
     # Controller
     SOFT_SPI = None
-    from controller_esp import Controller
+    from .controller_esp import Controller
