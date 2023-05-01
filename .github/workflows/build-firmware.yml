@@ -18,7 +18,7 @@ jobs:
           chmod +x mklfs
       - name: Create filesystem
         run: |
-          ./mklfs ./infinitrackStation filesystem.bin 0x200000
+          ./mklfs infinitrackStation/infinitrackStation filesystem.bin 0x200000
       - name: Setup Python
         uses: actions/setup-python@v4
         with:
