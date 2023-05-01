@@ -16,14 +16,15 @@ jobs:
           wget https://github.com/xingrz/mklfs/releases/download/v1.0.0/mklfs-linux.tar.xz
           tar -xf mklfs-linux.tar.xz
           chmod +x mklfs
+      - name: List files
+        run: ls infinitrackStation
       - name: Create filesystem
         run: |
-          ./mklfs infinitrackStation/infinitrackStation filesystem.bin 0x200000
+          ./mklfs infinitrackStation filesystem.bin 0x200000
       - name: Setup Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.10'
-          cache: 'pip'
       - name: Install esptool
         run: pip install esptool
       - name: Download MicroPython firmware
