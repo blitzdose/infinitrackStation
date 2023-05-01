@@ -150,6 +150,10 @@ class Module:
                 json.dump(self.lora_parameter, f)
                 Cryptor().set_key(binascii.unhexlify(self.lora_parameter['key']))
 
+            self.paring_mode_blink_delay = 10
+            self.pin_led_blue.off()
+
+            time.sleep(2)
             machine.reset()
 
     def initialize_lora(self):

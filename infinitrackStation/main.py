@@ -1,7 +1,7 @@
 import gc
 import os
 
-from baseStation import BaseStation
+from baseStation.base_station import BaseStation
 from loraModule.module import Module
 
 
