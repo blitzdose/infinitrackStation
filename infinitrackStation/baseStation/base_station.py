@@ -15,8 +15,8 @@ class BaseStation:
     def __init__(self):
         self.lora_parameter = {
             'address': bytes(0),
-            'tx_power_level': 40,
-            'signal_bandwidth': 500000,
+            'tx_power_level': 10,
+            'signal_bandwidth': 125000,
             'spreading_factor': 10,
             'coding_rate': 5,
             'key': bytes(0),
