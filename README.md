@@ -11,6 +11,6 @@ Dies ist der Code für die **Mikrocontroller**. Das Webinterface ist [hier](http
 
 ## Firmware auf LOLIN32 schreiben
 
-1. Lade dir die aktuellste Firmware herunter. [Download](https://github.com/blitzdose/infinitrackStation/releases)
+1. Lade dir die aktuellste Firmware herunter. [Download](https://github.com/blitzdose/infinitrackStation/releases/latest)
 2. Abhängigkeiten installieren `pip install esptool`
 3. Firmware auf den Mikrocontroller schreiben <br> `esptool.py --chip esp32 --port <COM-Port> write_flash infinitrack-firmware-<version>.bin`
